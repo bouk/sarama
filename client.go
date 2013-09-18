@@ -1,6 +1,7 @@
 package sarama
 
 import (
+	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -23,8 +24,7 @@ type Client struct {
 	// the broker addresses given to us through the constructor are not guaranteed to be returned in
 	// the cluster metadata (I *think* it only returns brokers who are currently leading partitions?)
 	// so we store them separately
-	extraBrokerAddrs []string
-	extraBroker      *Broker
+	seedBrokers []string
 
 	brokers map[int32]*Broker          // maps broker ids to brokers
 	leaders map[string]map[int32]int32 // maps topics to partition ids to broker ids
@@ -48,20 +48,11 @@ func NewClient(id string, addrs []string, config *ClientConfig) (*Client, error)
 	}
 
 	client := &Client{
-		id:               id,
-		config:           *config,
-		extraBrokerAddrs: addrs,
-		extraBroker:      NewBroker(addrs[0]),
-		brokers:          make(map[int32]*Broker),
-		leaders:          make(map[string]map[int32]int32),
-	}
-	client.extraBroker.Open()
-
-	// do an initial fetch of all cluster metadata by specifing an empty list of topics
-	err := client.RefreshAllMetadata()
-	if err != nil {
-		client.Close() // this closes tmp, since it's still in the brokers hash
-		return nil, err
+		id:          id,
+		config:      *config,
+		seedBrokers: addrs,
+		brokers:     make(map[int32]*Broker),
+		leaders:     make(map[string]map[int32]int32),
 	}
 
 	return client, nil
@@ -79,10 +70,6 @@ func (client *Client) Close() error {
 	}
 	client.brokers = nil
 	client.leaders = nil
-
-	if client.extraBroker != nil {
-		go client.extraBroker.Close()
-	}
 
 	return nil
 }
@@ -130,11 +117,14 @@ func (client *Client) Leader(topic string, partitionID int32) (*Broker, error) {
 			return nil, err
 		}
 		leader = client.cachedLeader(topic, partitionID)
+
+		if leader == nil {
+			return nil, UnknownTopicOrPartition
+		}
 	}
 
-	if leader == nil {
-		return nil, UnknownTopicOrPartition
-	}
+	// Gives an error if it is already connected, ignore that error
+	leader.Open()
 
 	return leader, nil
 }
@@ -153,72 +143,51 @@ func (client *Client) RefreshAllMetadata() error {
 
 // misc private helper functions
 
-// XXX: see https://github.com/Shopify/sarama/issues/15
-//      and https://github.com/Shopify/sarama/issues/23
-// disconnectBroker is a bad hacky way to accomplish broker management. It should be replaced with
-// something sane and the replacement should be made part of the public Client API
-func (client *Client) disconnectBroker(broker *Broker) {
-	client.lock.Lock()
-	defer client.lock.Unlock()
-
-	if broker == client.extraBroker {
-		client.extraBrokerAddrs = client.extraBrokerAddrs[1:]
-		if len(client.extraBrokerAddrs) > 0 {
-			client.extraBroker = NewBroker(client.extraBrokerAddrs[0])
-			client.extraBroker.Open()
-		} else {
-			client.extraBroker = nil
-		}
-	} else {
-		// we don't need to update the leaders hash, it will automatically get refreshed next time because
-		// the broker lookup will return nil
-		delete(client.brokers, broker.ID())
+func (client *Client) refreshMetadata(topics []string, retries int) error {
+	// Shuffle the array http://en.wikipedia.org/wiki/Fisher%E2%80%93Yates_shuffle
+	for i := range client.seedBrokers {
+		j := rand.Intn(i + 1)
+		client.seedBrokers[i], client.seedBrokers[j] = client.seedBrokers[j], client.seedBrokers[i]
 	}
 
-	go broker.Close()
-}
+	for _, seed := range client.seedBrokers {
+		broker := NewBroker(seed)
+		broker.Open()
 
-func (client *Client) refreshMetadata(topics []string, retries int) error {
-	for broker := client.any(); broker != nil; broker = client.any() {
+		// Connection failed, try next broker
+		if ok, _ := broker.Connected(); !ok {
+			continue
+		}
+
 		response, err := broker.GetMetadata(client.id, &MetadataRequest{Topics: topics})
 
-		switch err {
-		case nil:
-			// valid response, use it
-			retry, err := client.update(response)
-			switch {
-			case err != nil:
-				return err
-			case len(retry) == 0:
-				return nil
-			default:
-				if retries <= 0 {
-					return LeaderNotAvailable
-				}
-				time.Sleep(client.config.WaitForElection) // wait for leader election
-				return client.refreshMetadata(retry, retries-1)
-			}
-		case EncodingError:
-			// didn't even send, return the error
+		if err != nil {
 			return err
 		}
 
-		// some other error, remove that broker and try again
-		client.disconnectBroker(broker)
-	}
+		// valid response, use it
+		retry, err := client.update(response)
 
+		if err != nil {
+			return err
+		}
+
+		// all topics have been refreshed, we're done
+		if len(retry) == 0 {
+			return nil
+		}
+
+		if retries <= 0 {
+			return LeaderNotAvailable
+		}
+
+		// Back off for a little while before retrying
+		time.Sleep(client.config.WaitForElection)
+		return client.refreshMetadata(retry, retries-1)
+	}
+	// TODO: if there's still retries left, maybe wait for a certain amount of time and then retry
+	// the seed brokers
 	return OutOfBrokers
-}
-
-func (client *Client) any() *Broker {
-	client.lock.RLock()
-	defer client.lock.RUnlock()
-
-	for _, broker := range client.brokers {
-		return broker
-	}
-
-	return client.extraBroker
 }
 
 func (client *Client) cachedLeader(topic string, partitionID int32) *Broker {
@@ -261,18 +230,16 @@ func (client *Client) update(data *MetadataResponse) ([]string, error) {
 
 	// For all the brokers we received:
 	// - if it is a new ID, save it
-	// - if it is an existing ID, but the address we have is stale, discard the old one and save it
-	// - otherwise ignore it, replacing our existing one would just bounce the connection
-	// We asynchronously try to open connections to the new brokers. We don't care if they
-	// fail, since maybe that broker is unreachable but doesn't have a topic we care about.
-	// If it fails and we do care, whoever tries to use it will get the connection error.
+	// - if it is an existing ID, close the existing connection and reopen it
+	//   (like the Scala library does)
+	// We don't start opening connections, this happens on demand when the leader is requested
+	// XXX: it could be the case that a perfectly healthy broker is dropped and that another
+	//      consumer/producer is affected by this, causing it to also request new meta data
 	for _, broker := range data.Brokers {
 		if client.brokers[broker.ID()] == nil {
-			broker.Open()
 			client.brokers[broker.ID()] = broker
-		} else if broker.Addr() != client.brokers[broker.ID()].Addr() {
+		} else {
 			go client.brokers[broker.ID()].Close()
-			broker.Open()
 			client.brokers[broker.ID()] = broker
 		}
 	}

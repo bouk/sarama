@@ -157,6 +157,4 @@ func TestClientRefreshBehaviour(t *testing.T) {
 	} else if tst.ID() != 0xaa {
 		t.Error("Leader for my_topic had incorrect ID.")
 	}
-
-	client.disconnectBroker(tst)
 }

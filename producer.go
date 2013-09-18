@@ -113,7 +113,9 @@ func (p *Producer) safeSendMessage(key, value Encoder, retry bool) error {
 		if !retry {
 			return err
 		}
-		p.client.disconnectBroker(broker)
+
+		// Try to reconnect to the broker, failing if it can't
+		p.client.RefreshTopicMetadata(p.topic)
 		return p.safeSendMessage(key, value, false)
 	}
 
@@ -133,6 +135,8 @@ func (p *Producer) safeSendMessage(key, value Encoder, retry bool) error {
 		if !retry {
 			return block.Err
 		}
+
+		// Try to find the broker
 		err = p.client.RefreshTopicMetadata(p.topic)
 		if err != nil {
 			return err

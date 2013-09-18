@@ -194,10 +194,29 @@ func (c *Consumer) fetchMessages() {
 				return
 			}
 		default:
-			c.client.disconnectBroker(c.broker)
-			for c.broker, err = c.client.Leader(c.topic, c.partition); err != nil; c.broker, err = c.client.Leader(c.topic, c.partition) {
-				if !c.sendError(err) {
-					return
+			// Connection failed, try to get the new leader
+			// First let the client refresh the topic metadata to make sure it grabs the correct leader
+			// The client will close the connection to the old (failing) broker when it finds the new leader
+			// Endlessly try to reconnect
+			// XXX: if it can't connect to the seed brokers it will keep trying without delay, not a good idea
+			for {
+				if err = c.client.RefreshTopicMetadata(c.topic); err != nil {
+					if c.sendError(err) {
+						continue
+					} else {
+						return
+					}
+				}
+				if c.broker, err = c.client.Leader(c.topic, c.partition); err != nil {
+					if c.sendError(err) {
+						continue
+					} else {
+						return
+					}
+				}
+
+				if c.broker != nil {
+					break
 				}
 			}
 			continue
@@ -295,7 +314,7 @@ func (c *Consumer) getOffset(where OffsetTime, retry bool) (int64, error) {
 		if !retry {
 			return -1, err
 		}
-		c.client.disconnectBroker(c.broker)
+		c.client.RefreshTopicMetadata(c.topic)
 		c.broker, err = c.client.Leader(c.topic, c.partition)
 		if err != nil {
 			return -1, err
