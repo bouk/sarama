@@ -1,20 +1,26 @@
 package sarama
 
+import (
+	"time"
+)
+
 // ProducerConfig is used to pass multiple configuration options to NewProducer.
 type ProducerConfig struct {
-	Partitioner  Partitioner      // Chooses the partition to send messages to, or randomly if this is nil.
-	RequiredAcks RequiredAcks     // The level of acknowledgement reliability needed from the broker (defaults to no acknowledgement).
-	Timeout      int32            // The maximum time in ms the broker will wait the receipt of the number of RequiredAcks.
-	Compression  CompressionCodec // The type of compression to use on messages (defaults to no compression).
+	Partitioner     Partitioner      // Chooses the partition to send messages to, or randomly if this is nil.
+	RequiredAcks    RequiredAcks     // The level of acknowledgement reliability needed from the broker (defaults to no acknowledgement).
+	Timeout         int32            // The maximum time in ms the broker will wait the receipt of the number of RequiredAcks.
+	Compression     CompressionCodec // The type of compression to use on messages (defaults to no compression).
+	RefreshInterval int64            // Interval to refresh the brokers in ms
 }
 
 // Producer publishes Kafka messages on a given topic. It routes messages to the correct broker, refreshing metadata as appropriate,
 // and parses responses for errors. You must call Close() on a producer to avoid leaks, it may not be garbage-collected automatically when
 // it passes out of scope (this is in addition to calling Close on the underlying client, which is still necessary).
 type Producer struct {
-	client *Client
-	topic  string
-	config ProducerConfig
+	client          *Client
+	topic           string
+	config          ProducerConfig
+	lastRefreshTime time.Time
 }
 
 // NewProducer creates a new Producer using the given client. The resulting producer will publish messages on the given topic.
@@ -76,6 +82,14 @@ func (p *Producer) choosePartition(key Encoder) (int32, error) {
 }
 
 func (p *Producer) safeSendMessage(key, value Encoder, retry bool) error {
+	if p.config.RefreshInterval > 0 {
+		timeSinceLastRefresh := time.Now().Sub(p.lastRefreshTime)
+		if timeSinceLastRefresh >= p.config.RefreshInterval*time.Millisecond {
+			p.lastRefreshTime = time.Now()
+			p.client.RefreshTopicMetadata(p.topic)
+		}
+	}
+
 	partition, err := p.choosePartition(key)
 	if err != nil {
 		return err
