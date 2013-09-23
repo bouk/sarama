@@ -144,50 +144,48 @@ func (client *Client) RefreshAllMetadata() error {
 // misc private helper functions
 
 func (client *Client) refreshMetadata(topics []string, retries int) error {
-	// Shuffle the array http://en.wikipedia.org/wiki/Fisher%E2%80%93Yates_shuffle
-	for i := range client.seedBrokers {
-		j := rand.Intn(i + 1)
-		client.seedBrokers[i], client.seedBrokers[j] = client.seedBrokers[j], client.seedBrokers[i]
-	}
-
-	for _, seed := range client.seedBrokers {
-		broker := NewBroker(seed)
-		broker.Open()
-
-		// Connection failed, try next broker
-		if ok, _ := broker.Connected(); !ok {
-			continue
+	for ; retries >= 0; retries-- {
+		// Shuffle the array http://en.wikipedia.org/wiki/Fisher%E2%80%93Yates_shuffle
+		for i := range client.seedBrokers {
+			j := rand.Intn(i + 1)
+			client.seedBrokers[i], client.seedBrokers[j] = client.seedBrokers[j], client.seedBrokers[i]
 		}
 
-		response, err := broker.GetMetadata(client.id, &MetadataRequest{Topics: topics})
+		for _, seed := range client.seedBrokers {
+			broker := NewBroker(seed)
+			broker.Open()
 
-		if err != nil {
-			return err
+			// Connection failed, try next seed broker
+			if ok, _ := broker.Connected(); !ok {
+				continue
+			}
+
+			response, err := broker.GetMetadata(client.id, &MetadataRequest{Topics: topics})
+			go broker.Close()
+
+			if err != nil {
+				return err
+			}
+
+			topics, err = client.update(response)
+
+			if err != nil {
+				return err
+			}
+
+			// all topics have been refreshed, we're done
+			if len(topics) == 0 {
+				return nil
+			}
+
+			// The broker wasn't able to get the leaders for all topics, retry after delay
+			break
 		}
 
-		// valid response, use it
-		retry, err := client.update(response)
-
-		if err != nil {
-			return err
-		}
-
-		// all topics have been refreshed, we're done
-		if len(retry) == 0 {
-			return nil
-		}
-
-		if retries <= 0 {
-			return LeaderNotAvailable
-		}
-
-		// Back off for a little while before retrying
+		// Wait before retrying
 		time.Sleep(client.config.WaitForElection)
-		return client.refreshMetadata(retry, retries-1)
 	}
-	// TODO: if there's still retries left, maybe wait for a certain amount of time and then retry
-	// the seed brokers
-	return OutOfBrokers
+	return LeaderNotAvailable
 }
 
 func (client *Client) cachedLeader(topic string, partitionID int32) *Broker {
