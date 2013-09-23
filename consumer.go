@@ -184,28 +184,31 @@ func (c *Consumer) fetchMessages() {
 		request.AddBlock(c.topic, c.partition, c.offset, fetchSize)
 
 		response, err := c.broker.Fetch(c.client.id, request)
-		switch {
-		case err == nil:
+		switch err {
+		case nil:
 			break
-		case err == EncodingError:
+		case EncodingError:
 			if c.sendError(err) {
 				continue
 			} else {
 				return
 			}
+		case NotConnected:
+			// First just try to get the leader, maybe it has been refreshed
+
+			c.broker, err = c.client.Leader(c.topic, c.partition)
+			if err == nil {
+				continue
+			}
+
+			// It seems something else happened, fallthough and try to find the new leader
+			fallthrough
 		default:
 			// Connection failed, try to get the new leader
 			// First let the client refresh the topic metadata to make sure it grabs the correct leader
 			// The client will close the connection to the old (failing) broker when it finds the new leader
-			// XXX: if it can't connect to the seed brokers it will keep trying without delay, not a good idea
 
-			// First just try to get the leader, maybe it has been refreshed
-			c.broker, err = c.client.Leader(c.topic, c.partition)
-			if c.broker != nil && err == nil {
-				continue
-			}
-
-			// Failed to get the leader, endlessly try to reconnect
+			// endlessly try to reconnect
 			for {
 				err = c.client.RefreshTopicMetadata(c.topic)
 				if err != nil {
