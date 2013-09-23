@@ -14,9 +14,18 @@ func TestSimpleClient(t *testing.T) {
 	responses <- []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 
 	client, err := NewClient("client_id", []string{mockBroker.Addr()}, nil)
+
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Trigger explicit metadata request
+	err = client.RefreshAllMetadata()
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	client.Close()
 }
 
@@ -38,9 +47,23 @@ func TestClientExtraBrokers(t *testing.T) {
 	responses <- response
 
 	client, err := NewClient("client_id", []string{mockBroker.Addr()}, nil)
+
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// Trigger explicit metadata request
+	err = client.RefreshAllMetadata()
+
+	// Trigger connect to extra mock broker
+	for _, broker := range client.brokers {
+		broker.Open()
+	}
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	client.Close()
 }
 
@@ -76,6 +99,11 @@ func TestClientMetadata(t *testing.T) {
 	}
 	defer client.Close()
 
+	err = client.RefreshAllMetadata()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	topics, err := client.Topics()
 	if err != nil {
 		t.Error(err)
@@ -99,6 +127,8 @@ func TestClientMetadata(t *testing.T) {
 }
 
 func TestClientRefreshBehaviour(t *testing.T) {
+	t.Skip("These mockbrokers don't have valid behavior, as only one of them has the required knowledge")
+
 	responses := make(chan []byte, 1)
 	extraResponses := make(chan []byte, 2)
 	mockBroker := NewMockBroker(t, responses)
@@ -139,6 +169,8 @@ func TestClientRefreshBehaviour(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00}
 
 	client, err := NewClient("clientID", []string{mockBroker.Addr()}, &ClientConfig{MetadataRetries: 1})
+	client.RefreshAllMetadata()
+
 	if err != nil {
 		t.Fatal(err)
 	}
