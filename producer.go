@@ -84,7 +84,7 @@ func (p *Producer) choosePartition(key Encoder) (int32, error) {
 func (p *Producer) safeSendMessage(key, value Encoder, retry bool) error {
 	if p.config.RefreshInterval > 0 {
 		timeSinceLastRefresh := time.Now().Sub(p.lastRefreshTime)
-		if timeSinceLastRefresh >= p.config.RefreshInterval*time.Millisecond {
+		if timeSinceLastRefresh >= time.Duration(p.config.RefreshInterval)*time.Millisecond {
 			p.lastRefreshTime = time.Now()
 			p.client.RefreshTopicMetadata(p.topic)
 		}
